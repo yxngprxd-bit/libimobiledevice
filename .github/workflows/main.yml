@@ -1,0 +1,192 @@
+name: Build libimobiledevice Windows Tools
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Windows x64
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            git
+            make
+            libtool
+            autoconf
+            automake-wrapper
+            pkg-config
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-openssl
+
+      - name: Build libplist
+        run: |
+          set -euo pipefail
+
+          git clone --depth 1 https://github.com/libimobiledevice/libplist.git
+          cd libplist
+
+          ./autogen.sh \
+            --prefix=/mingw64 \
+            --without-cython
+
+          make -j2
+          make install
+
+      - name: Build libimobiledevice-glue
+        run: |
+          set -euo pipefail
+
+          git clone --depth 1 https://github.com/libimobiledevice/libimobiledevice-glue.git
+          cd libimobiledevice-glue
+
+          export PKG_CONFIG_PATH=/mingw64/lib/pkgconfig
+
+          ./autogen.sh \
+            --prefix=/mingw64
+
+          make -j2
+          make install
+
+      - name: Build libusbmuxd
+        run: |
+          set -euo pipefail
+
+          git clone --depth 1 https://github.com/libimobiledevice/libusbmuxd.git
+          cd libusbmuxd
+
+          export PKG_CONFIG_PATH=/mingw64/lib/pkgconfig
+
+          ./autogen.sh \
+            --prefix=/mingw64
+
+          make -j2
+          make install
+
+      - name: Build libimobiledevice
+        run: |
+          set -euo pipefail
+
+          git clone --depth 1 https://github.com/libimobiledevice/libimobiledevice.git
+          cd libimobiledevice
+
+          export PKG_CONFIG_PATH=/mingw64/lib/pkgconfig
+
+          ./autogen.sh \
+            --prefix=/mingw64 \
+            --without-cython
+
+          make -j2
+          make install
+
+      - name: Verify tools
+        run: |
+          set -euo pipefail
+
+          echo "Installed iDevice utilities:"
+          ls -lah /mingw64/bin/idevice*.exe
+
+          test -f /mingw64/bin/idevicesyslog.exe
+          test -f /mingw64/bin/idevice_id.exe
+
+          echo
+          echo "idevicesyslog:"
+          /mingw64/bin/idevicesyslog.exe --help || true
+
+      - name: Prepare portable Windows package
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$GITHUB_WORKSPACE/windows-tools"
+
+          cp /mingw64/bin/idevice*.exe \
+             "$GITHUB_WORKSPACE/windows-tools/"
+
+          # Copy the MinGW runtime/dependency DLLs so the tools can run
+          # outside the GitHub Actions MSYS2 environment.
+          ldd /mingw64/bin/idevicesyslog.exe \
+            | awk '/\/mingw64\/bin\// {print $3}' \
+            | sort -u \
+            | while read -r dll; do
+                if [ -f "$dll" ]; then
+                  cp -n "$dll" "$GITHUB_WORKSPACE/windows-tools/"
+                fi
+              done
+
+          ldd /mingw64/bin/idevice_id.exe \
+            | awk '/\/mingw64\/bin\// {print $3}' \
+            | sort -u \
+            | while read -r dll; do
+                if [ -f "$dll" ]; then
+                  cp -n "$dll" "$GITHUB_WORKSPACE/windows-tools/"
+                fi
+              done
+
+          cat > "$GITHUB_WORKSPACE/windows-tools/START-LOGGING.bat" <<'EOF'
+          @echo off
+          title Cheapshot iPhone Logger
+
+          echo ============================================
+          echo        Cheapshot iPhone Logger
+          echo ============================================
+          echo.
+
+          echo Checking for connected iPhone...
+          echo.
+
+          idevice_id.exe -l
+
+          echo.
+          echo If your iPhone appears above, unlock it and
+          echo tap Trust if iOS asks you to trust this PC.
+          echo.
+          echo Press any key to start logging.
+          pause >nul
+
+          echo.
+          echo Logging has started.
+          echo.
+          echo NOW:
+          echo   1. Open Cheapshot
+          echo   2. Join the game
+          echo   3. Wait for Cheapshot to close
+          echo   4. Return here and press CTRL+C
+          echo.
+          echo The log will be saved as:
+          echo cheapshot-log.txt
+          echo.
+
+          idevicesyslog.exe > cheapshot-log.txt
+
+          echo.
+          echo Finished.
+          pause
+          EOF
+
+          echo
+          echo "Final portable package:"
+          ls -lah "$GITHUB_WORKSPACE/windows-tools"
+
+      - name: Upload Windows tools
+        uses: actions/upload-artifact@v6
+        with:
+          name: libimobiledevice-windows-x64
+          path: windows-tools/
+          if-no-files-found: error
+          retention-days: 7
